@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Flashcard Extension",
+  "version": "1.0.0",
+  "description": "Smart flashcard learning with spaced repetition and Gmail login",
+  "permissions": [
+    "storage",
+    "identity",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "https://*.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "dist/background.js"
+  },
+  "action": {
+    "default_popup": "dist/popup.html",
+    "default_title": "Flashcard Extension",
+    "default_icon": {
+      "16": "icon/icon-16.png",
+      "48": "icon/icon-48.png",
+      "128": "icon/icon-128.png"
+    }
+  },
+  "oauth2": {
+    "client_id": "615396655505-pu183qqahr1fdtddp5n5un3m4h347kja.apps.googleusercontent.com",
+    "scopes": [
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile"
+    ]
+  },
+  "icons": {
+    "16": "icon/icon-16.png",
+    "48": "icon/icon-48.png",
+    "128": "icon/icon-128.png"
+  }
+}
