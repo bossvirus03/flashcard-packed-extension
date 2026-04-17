@@ -20,6 +20,8 @@ interface FlashcardStats {
   total: number;
 }
 
+type PhoneticMap = Record<string, string>;
+
 function detectLanguage(text: string): string {
   // Basic Vietnamese detection by accented characters.
   const hasVietnamese =
@@ -93,6 +95,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   const [submittingReview, setSubmittingReview] = useState(false);
   const [reviewMessage, setReviewMessage] = useState("");
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [phonetics, setPhonetics] = useState<PhoneticMap>({});
+  const [loadingPhonetic, setLoadingPhonetic] = useState(false);
 
   useEffect(() => {
     void loadData();
@@ -118,6 +122,19 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
     window.speechSynthesis.cancel();
     setIsSpeaking(false);
   }, [showAnswer]);
+
+  useEffect(() => {
+    const card = flashcards[0];
+    if (!card || showAnswer) {
+      return;
+    }
+
+    if (phonetics[card.id]) {
+      return;
+    }
+
+    void fetchPhonetic(card.id, card.front);
+  }, [flashcards, showAnswer]);
 
   const loadData = async (mode: "due" | "all" = "due") => {
     setLoading(true);
@@ -258,6 +275,65 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
     setIsSpeaking(true);
   };
 
+  const extractLookupWord = (text: string) => {
+    const cleaned = text
+      .trim()
+      .replace(/[?.,!;:()[\]{}"“”]/g, " ")
+      .split(/\s+/)
+      .find((w) => /^[a-zA-Z'-]+$/.test(w));
+
+    return cleaned ? cleaned.toLowerCase() : "";
+  };
+
+  const fetchPhonetic = async (cardId: string, question: string) => {
+    const lang = detectLanguage(question);
+    if (lang !== "en-US") {
+      setPhonetics((prev) => ({
+        ...prev,
+        [cardId]: "IPA chưa hỗ trợ tốt cho ngôn ngữ này",
+      }));
+      return;
+    }
+
+    const lookupWord = extractLookupWord(question);
+    if (!lookupWord) {
+      return;
+    }
+
+    setLoadingPhonetic(true);
+
+    try {
+      const response = await fetch(
+        `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(lookupWord)}`,
+      );
+
+      if (!response.ok) {
+        throw new Error(`Phonetic API failed (${response.status})`);
+      }
+
+      const data = (await response.json()) as Array<{
+        phonetic?: string;
+        phonetics?: Array<{ text?: string }>;
+      }>;
+
+      const fromMain = data?.[0]?.phonetic;
+      const fromList = data?.[0]?.phonetics?.find((p) => p.text)?.text;
+      const phonetic = fromMain || fromList;
+
+      if (phonetic) {
+        setPhonetics((prev) => ({ ...prev, [cardId]: phonetic }));
+      }
+    } catch (error) {
+      console.error("Failed to fetch phonetic:", error);
+      setPhonetics((prev) => ({
+        ...prev,
+        [cardId]: "Không lấy được phiên âm",
+      }));
+    } finally {
+      setLoadingPhonetic(false);
+    }
+  };
+
   const currentCard = flashcards[0];
 
   return (
@@ -265,17 +341,27 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
       <div className="header">
         <h2>Flashcard Pro</h2>
         <div className="user-menu">
-          <div className="avatar" title={user?.name || user?.email || 'User'}>
+          <div className="avatar" title={user?.name || user?.email || "User"}>
             {user?.picture ? (
-              <img className="avatar-img" src={user.picture} alt="User avatar" />
+              <img
+                className="avatar-img"
+                src={user.picture}
+                alt="User avatar"
+              />
             ) : (
               <span className="avatar-fallback">
-                {String(user?.name || user?.email || 'U').charAt(0).toUpperCase()}
+                {String(user?.name || user?.email || "U")
+                  .charAt(0)
+                  .toUpperCase()}
               </span>
             )}
           </div>
 
-          <button className="btn-logout btn-logout-icon" onClick={onLogout} title="Logout">
+          <button
+            className="btn-logout btn-logout-icon"
+            onClick={onLogout}
+            title="Logout"
+          >
             <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
               <path
                 d="M15 3h-4a2 2 0 0 0-2 2v3h2V5h4v14h-4v-3H9v3a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm-3.6 6.4-1.4 1.4 2.2 2.2H4v2h8.2L10 17.2l1.4 1.4L16 14l-4.6-4.6z"
@@ -362,6 +448,19 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                     >
                       {isSpeaking ? "Stop" : "🔊"}
                     </button>
+                    {!showAnswer && (
+                      <button
+                        type="button"
+                        className="phonetic-btn"
+                        onClick={() =>
+                          void fetchPhonetic(currentCard.id, currentCard.front)
+                        }
+                        disabled={loadingPhonetic}
+                        aria-label="Fetch phonetic"
+                      >
+                        {loadingPhonetic ? "..." : "IPA"}
+                      </button>
+                    )}
                   </div>
 
                   <button
@@ -372,6 +471,11 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                     <div className="study-text">
                       {showAnswer ? currentCard.back : currentCard.front}
                     </div>
+                    {!showAnswer && phonetics[currentCard.id] && (
+                      <div className="study-phonetic">
+                        {phonetics[currentCard.id]}
+                      </div>
+                    )}
                     <div className="study-hint">Tap card to flip</div>
                   </button>
 
