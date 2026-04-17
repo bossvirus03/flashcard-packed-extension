@@ -20,6 +20,21 @@ interface FlashcardStats {
   total: number;
 }
 
+interface LessonSession {
+  id: string;
+  flashcardIds: string[];
+  currentIndex: number;
+  totalCards: number;
+  completedAt: string | null;
+  isComplete: boolean;
+}
+
+interface LessonPayload {
+  lesson: LessonSession;
+  flashcards: Flashcard[];
+  currentCard: Flashcard | null;
+}
+
 type PhoneticMap = Record<string, string>;
 
 function detectLanguage(text: string): string {
@@ -89,6 +104,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState("review");
   const [flashcards, setFlashcards] = useState<Flashcard[]>([]);
+  const [activeLesson, setActiveLesson] = useState<LessonSession | null>(null);
   const [stats, setStats] = useState<FlashcardStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAnswer, setShowAnswer] = useState(false);
@@ -97,6 +113,11 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [phonetics, setPhonetics] = useState<PhoneticMap>({});
   const [loadingPhonetic, setLoadingPhonetic] = useState(false);
+
+  const getRemainingLessonCards = (
+    lesson: LessonSession,
+    cards: Flashcard[],
+  ) => cards.slice(Math.min(lesson.currentIndex, cards.length));
 
   useEffect(() => {
     void loadData();
@@ -136,34 +157,8 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
     void fetchPhonetic(card.id, card.front);
   }, [flashcards, showAnswer]);
 
-  const loadData = async (mode: "due" | "all" = "due") => {
-    setLoading(true);
-    setShowAnswer(false);
-    setReviewMessage("");
-    window.speechSynthesis.cancel();
-    setIsSpeaking(false);
-
+  const loadStats = async (token: string) => {
     try {
-      const token = await getAuthToken();
-
-      const cardsUrl =
-        mode === "all"
-          ? "https://flashcard-extension.onrender.com/flashcards"
-          : "https://flashcard-extension.onrender.com/flashcards/due?limit=20";
-
-      const cardsResponse = await fetch(cardsUrl, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-      const cards = (await cardsResponse.json()) as Flashcard[];
-      setFlashcards(cards);
-
-      if (mode === "all" && cards.length > 0) {
-        setReviewMessage(`Loaded ${cards.length} cards for relearning.`);
-      }
-
-      // Fetch stats
       const statsResponse = await fetch(
         "https://flashcard-extension.onrender.com/flashcards/stats",
         {
@@ -175,8 +170,115 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
       const statsData = await statsResponse.json();
       setStats(statsData);
     } catch (error) {
+      console.error("Failed to load stats:", error);
+    }
+  };
+
+  const loadData = async (mode: "initial" | "due" | "lesson" = "initial") => {
+    setLoading(true);
+    setShowAnswer(false);
+    setReviewMessage("");
+    window.speechSynthesis.cancel();
+    setIsSpeaking(false);
+
+    try {
+      const token = await getAuthToken();
+
+      if (mode === "lesson") {
+        const response = await fetch(
+          "https://flashcard-extension.onrender.com/lessons/relearn",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error(`Failed to start lesson (${response.status})`);
+        }
+
+        const lessonData = (await response.json()) as LessonPayload | null;
+
+        if (!lessonData || !lessonData.lesson || !lessonData.flashcards.length) {
+          setActiveLesson(null);
+          setFlashcards([]);
+          setReviewMessage("No cards available for relearning.");
+          void loadStats(token);
+          return;
+        }
+
+        setActiveLesson(lessonData.lesson);
+        setFlashcards(
+          getRemainingLessonCards(lessonData.lesson, lessonData.flashcards),
+        );
+        setReviewMessage(
+          `Lesson started with ${lessonData.flashcards.length} shuffled cards.`,
+        );
+        void loadStats(token);
+        return;
+      }
+
+      if (mode === "initial") {
+        const activeLessonResponse = await fetch(
+          "https://flashcard-extension.onrender.com/lessons/active",
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          },
+        );
+
+        if (activeLessonResponse.ok) {
+          const activeLessonData = (await activeLessonResponse.json()) as
+            | LessonPayload
+            | null;
+
+          if (
+            activeLessonData?.lesson &&
+            !activeLessonData.lesson.completedAt &&
+            activeLessonData.flashcards.length > 0
+          ) {
+            setActiveLesson(activeLessonData.lesson);
+            setFlashcards(
+              getRemainingLessonCards(
+                activeLessonData.lesson,
+                activeLessonData.flashcards,
+              ),
+            );
+            setReviewMessage(
+              `Resuming lesson at ${Math.min(
+                activeLessonData.lesson.currentIndex + 1,
+                activeLessonData.lesson.totalCards,
+              )}/${activeLessonData.lesson.totalCards}.`,
+            );
+            void loadStats(token);
+            return;
+          }
+        }
+      }
+
+      const cardsResponse = await fetch(
+        "https://flashcard-extension.onrender.com/flashcards/due?limit=20",
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        },
+      );
+      const cards = (await cardsResponse.json()) as Flashcard[];
+      setActiveLesson(null);
+      setFlashcards(cards);
+
+      void loadStats(token);
+    } catch (error) {
       console.error("Failed to load data:", error);
-      setReviewMessage("Failed to load due cards. Please try again.");
+      setReviewMessage(
+        mode === "lesson"
+          ? "Failed to start relearning. Please try again."
+          : "Failed to load due cards. Please try again.",
+      );
     } finally {
       setLoading(false);
     }
@@ -206,6 +308,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
           body: JSON.stringify({
             flashcardId: currentCard.id,
             quality,
+            ...(activeLesson ? { lessonId: activeLesson.id } : {}),
           }),
         },
       );
@@ -214,11 +317,28 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
         throw new Error(`Review failed (${response.status})`);
       }
 
-      setFlashcards((prev) => prev.slice(1));
+      const result = (await response.json()) as {
+        lesson?: LessonSession & { completedAt: string | null };
+      };
+
       setShowAnswer(false);
-      setReviewMessage("Saved review. Great job!");
       window.speechSynthesis.cancel();
       setIsSpeaking(false);
+
+      if (result.lesson) {
+        if (result.lesson.completedAt) {
+          setActiveLesson(null);
+          setFlashcards([]);
+          setReviewMessage("Lesson completed. Progress saved.");
+        } else {
+          setActiveLesson(result.lesson);
+          setFlashcards((prev) => prev.slice(1));
+          setReviewMessage("Lesson progress saved.");
+        }
+      } else {
+        setFlashcards((prev) => prev.slice(1));
+        setReviewMessage("Saved review. Great job!");
+      }
 
       setStats((prev) => {
         if (!prev) {
@@ -416,17 +536,24 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
             ) : currentCard ? (
               <div className="study-card-wrap">
                 <div className="study-progress">
-                  <span>{flashcards.length} card(s) due now</span>
+                        <span>
+                          {activeLesson
+                            ? `Lesson ${Math.min(
+                                activeLesson.currentIndex + 1,
+                                activeLesson.totalCards,
+                              )}/${activeLesson.totalCards}`
+                            : `${flashcards.length} card(s) due now`}
+                        </span>
                   <div className="review-actions">
                     <button
                       className="btn btn-refresh"
-                      onClick={() => void loadData("due")}
+                            onClick={() => void loadData("due")}
                     >
                       Due
                     </button>
                     <button
                       className="btn btn-refresh"
-                      onClick={() => void loadData("all")}
+                            onClick={() => void loadData("lesson")}
                     >
                       Relearn
                     </button>
@@ -538,7 +665,7 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
                   </button>
                   <button
                     className="btn btn-refresh"
-                    onClick={() => void loadData("all")}
+                    onClick={() => void loadData("lesson")}
                   >
                     Học Lại Tất Cả
                   </button>
