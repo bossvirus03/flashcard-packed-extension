@@ -1,493 +1,115 @@
 import React, { useState, useEffect } from "react";
-
-interface DashboardScreenProps {
-  user: any;
-  onLogout: () => void;
-}
-
-interface Flashcard {
-  id: string;
-  front: string;
-  back: string;
-  repetitions: number;
-  easeFactor: number;
-}
+import { PracticeScreen } from "./PracticeScreen";
+import {
+  fetchReviewCards,
+  fetchStats,
+  resetPractice,
+  submitReview as submitReviewApi,
+  Flashcard,
+  API_BASE,
+} from "../utils/flashcardService";
+import { getAuthToken } from "../utils/auth";
 
 interface FlashcardStats {
-  dueToday: number;
-  learned: number;
-  toLearn: number;
   total: number;
+  learned: number;
+  toReview: number;
 }
 
-interface LessonSession {
-  id: string;
-  flashcardIds: string[];
-  currentIndex: number;
-  totalCards: number;
-  completedAt: string | null;
-  isComplete: boolean;
-}
+type DashboardTab = "review" | "practice" | "create";
 
-interface LessonPayload {
-  lesson: LessonSession;
-  flashcards: Flashcard[];
-  currentCard: Flashcard | null;
-}
-
-type PhoneticMap = Record<string, string>;
-
-function detectLanguage(text: string): string {
-  // Basic Vietnamese detection by accented characters.
-  const hasVietnamese =
-    /[\u0102\u0103\u00c2\u00c3\u00ca\u00ca\u00d4\u00f4\u01a0\u01a1\u01af\u01b0\u0110\u0111\u1ea0-\u1ef9]/i.test(
-      text,
-    );
-  return hasVietnamese ? "vi-VN" : "en-US";
-}
-
-function pickBestVoice(lang: string): SpeechSynthesisVoice | null {
-  const voices = window.speechSynthesis.getVoices();
-  if (!voices.length) {
-    return null;
-  }
-
-  const sameLang = voices.filter((v) =>
-    v.lang.toLowerCase().startsWith(lang.split("-")[0].toLowerCase()),
-  );
-  const pool = sameLang.length ? sameLang : voices;
-
-  const preferredPatterns = [
-    /Google/i,
-    /Microsoft/i,
-    /Samantha|Alex|Daniel|Serena/i,
-    /Premium|Enhanced|Neural/i,
-  ];
-
-  for (const pattern of preferredPatterns) {
-    const match = pool.find((v) => pattern.test(v.name));
-    if (match) {
-      return match;
-    }
-  }
-
-  return pool[0] ?? null;
-}
-
-async function getAuthToken(): Promise<string> {
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.get("authToken", (data) => {
-      if (chrome.runtime.lastError) {
-        reject(
-          new Error(
-            chrome.runtime.lastError.message || "Failed to get auth token",
-          ),
-        );
-        return;
-      }
-
-      const token = data.authToken as string | undefined;
-
-      if (!token) {
-        reject(new Error("Missing auth token"));
-        return;
-      }
-
-      resolve(token);
-    });
-  });
-}
-
-export const DashboardScreen: React.FC<DashboardScreenProps> = ({
+export const DashboardScreen: React.FC<{ user: any; onLogout: () => void }> = ({
   user,
   onLogout,
 }) => {
-  const [activeTab, setActiveTab] = useState("review");
+  const [activeTab, setActiveTab] = useState<DashboardTab>("review");
   const [flashcards, setFlashcards] = useState<Flashcard[]>([]);
-  const [activeLesson, setActiveLesson] = useState<LessonSession | null>(null);
   const [stats, setStats] = useState<FlashcardStats | null>(null);
   const [loading, setLoading] = useState(true);
-  const [showAnswer, setShowAnswer] = useState(false);
+  const [showAnswer, setShowAnswer] = useState(false);     // Giữ để lật thẻ
   const [submittingReview, setSubmittingReview] = useState(false);
   const [reviewMessage, setReviewMessage] = useState("");
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [phonetics, setPhonetics] = useState<PhoneticMap>({});
-  const [loadingPhonetic, setLoadingPhonetic] = useState(false);
 
-  const getRemainingLessonCards = (
-    lesson: LessonSession,
-    cards: Flashcard[],
-  ) => cards.slice(Math.min(lesson.currentIndex, cards.length));
+  const currentCard = flashcards[0];
 
   useEffect(() => {
     void loadData();
-
-    // Ensure browser voice list is populated (many browsers load it lazily).
-    window.speechSynthesis.getVoices();
-    const onVoicesChanged = () => {
-      window.speechSynthesis.getVoices();
-    };
-    window.speechSynthesis.addEventListener("voiceschanged", onVoicesChanged);
-
-    return () => {
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.removeEventListener(
-        "voiceschanged",
-        onVoicesChanged,
-      );
-    };
   }, []);
 
-  useEffect(() => {
-    // Stop speaking when switching card side.
-    window.speechSynthesis.cancel();
-    setIsSpeaking(false);
-  }, [showAnswer]);
-
-  useEffect(() => {
-    const card = flashcards[0];
-    if (!card || showAnswer) {
-      return;
-    }
-
-    if (phonetics[card.id]) {
-      return;
-    }
-
-    void fetchPhonetic(card.id, card.front);
-  }, [flashcards, showAnswer]);
-
-  const loadStats = async (token: string) => {
-    try {
-      const statsResponse = await fetch(
-        "https://flashcard-extension.onrender.com/flashcards/stats",
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        },
-      );
-      const statsData = await statsResponse.json();
-      setStats(statsData);
-    } catch (error) {
-      console.error("Failed to load stats:", error);
-    }
-  };
-
-  const loadData = async (mode: "initial" | "due" | "lesson" = "initial") => {
+  const loadData = async () => {
     setLoading(true);
     setShowAnswer(false);
     setReviewMessage("");
-    window.speechSynthesis.cancel();
-    setIsSpeaking(false);
 
     try {
-      const token = await getAuthToken();
-
-      if (mode === "lesson") {
-        const response = await fetch(
-          "https://flashcard-extension.onrender.com/lessons/relearn",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          },
-        );
-
-        if (!response.ok) {
-          throw new Error(`Failed to start lesson (${response.status})`);
-        }
-
-        const lessonData = (await response.json()) as LessonPayload | null;
-
-        if (!lessonData || !lessonData.lesson || !lessonData.flashcards.length) {
-          setActiveLesson(null);
-          setFlashcards([]);
-          setReviewMessage("No cards available for relearning.");
-          void loadStats(token);
-          return;
-        }
-
-        setActiveLesson(lessonData.lesson);
-        setFlashcards(
-          getRemainingLessonCards(lessonData.lesson, lessonData.flashcards),
-        );
-        setReviewMessage(
-          `Lesson started with ${lessonData.flashcards.length} shuffled cards.`,
-        );
-        void loadStats(token);
-        return;
-      }
-
-      if (mode === "initial") {
-        const activeLessonResponse = await fetch(
-          "https://flashcard-extension.onrender.com/lessons/active",
-          {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          },
-        );
-
-        if (activeLessonResponse.ok) {
-          const activeLessonData = (await activeLessonResponse.json()) as
-            | LessonPayload
-            | null;
-
-          if (
-            activeLessonData?.lesson &&
-            !activeLessonData.lesson.completedAt &&
-            activeLessonData.flashcards.length > 0
-          ) {
-            setActiveLesson(activeLessonData.lesson);
-            setFlashcards(
-              getRemainingLessonCards(
-                activeLessonData.lesson,
-                activeLessonData.flashcards,
-              ),
-            );
-            setReviewMessage(
-              `Resuming lesson at ${Math.min(
-                activeLessonData.lesson.currentIndex + 1,
-                activeLessonData.lesson.totalCards,
-              )}/${activeLessonData.lesson.totalCards}.`,
-            );
-            void loadStats(token);
-            return;
-          }
-        }
-      }
-
-      const cardsResponse = await fetch(
-        "https://flashcard-extension.onrender.com/flashcards/due?limit=20",
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-          },
-        },
-      );
-      const cards = (await cardsResponse.json()) as Flashcard[];
-      setActiveLesson(null);
+      const cards = await fetchReviewCards(20);
       setFlashcards(cards);
 
-      void loadStats(token);
+      const currentStats = await fetchStats();
+      setStats(currentStats);
     } catch (error) {
       console.error("Failed to load data:", error);
-      setReviewMessage(
-        mode === "lesson"
-          ? "Failed to start relearning. Please try again."
-          : "Failed to load due cards. Please try again.",
-      );
+      setReviewMessage("Không thể tải dữ liệu. Vui lòng thử lại.");
     } finally {
       setLoading(false);
     }
   };
 
-  const submitReview = async (quality: number) => {
-    const currentCard = flashcards[0];
-
-    if (!currentCard) {
-      return;
-    }
+  const handleReview = async (isGotIt: boolean) => {
+    if (!currentCard) return;
 
     setSubmittingReview(true);
     setReviewMessage("");
 
     try {
-      const token = await getAuthToken();
+      await submitReviewApi(currentCard.id, isGotIt);
 
-      const response = await fetch(
-        "https://flashcard-extension.onrender.com/reviews",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            flashcardId: currentCard.id,
-            quality,
-            ...(activeLesson ? { lessonId: activeLesson.id } : {}),
-          }),
-        },
-      );
+      // Chuyển sang thẻ tiếp theo
+      setFlashcards((prev) => prev.slice(1));
+      setShowAnswer(false);                    // Reset trạng thái lật thẻ
 
-      if (!response.ok) {
-        throw new Error(`Review failed (${response.status})`);
-      }
-
-      const result = (await response.json()) as {
-        lesson?: LessonSession & { completedAt: string | null };
-      };
-
-      setShowAnswer(false);
-      window.speechSynthesis.cancel();
-      setIsSpeaking(false);
-
-      if (result.lesson) {
-        if (result.lesson.completedAt) {
-          setActiveLesson(null);
-          setFlashcards([]);
-          setReviewMessage("Lesson completed. Progress saved.");
-        } else {
-          setActiveLesson(result.lesson);
-          setFlashcards((prev) => prev.slice(1));
-          setReviewMessage("Lesson progress saved.");
-        }
+      if (isGotIt && currentCard.gotItCount + 1 >= 7) {
+        setReviewMessage("🎉 Thẻ này đã thuộc! Đã chuyển sang thẻ tiếp theo.");
       } else {
-        setFlashcards((prev) => prev.slice(1));
-        setReviewMessage("Saved review. Great job!");
+        setReviewMessage(isGotIt ? "Got It! 👍" : "Study Again");
       }
 
-      setStats((prev) => {
-        if (!prev) {
-          return prev;
-        }
-
-        return {
-          ...prev,
-          dueToday: Math.max(0, prev.dueToday - 1),
-        };
-      });
+      // Cập nhật stats
+      const currentStats = await fetchStats();
+      setStats(currentStats);
     } catch (error) {
-      console.error("Failed to submit review:", error);
-      setReviewMessage("Failed to submit review. Please try again.");
+      console.error(error);
+      setReviewMessage("Có lỗi khi lưu tiến độ. Vui lòng thử lại.");
     } finally {
       setSubmittingReview(false);
     }
   };
 
-  const handleSpeak = () => {
-    const card = flashcards[0];
-    if (!card) {
-      return;
-    }
-
-    if (isSpeaking) {
-      window.speechSynthesis.cancel();
-      setIsSpeaking(false);
-      return;
-    }
-
-    const text = showAnswer ? card.back : card.front;
-    if (!text || !text.trim()) {
-      return;
-    }
-
-    const lang = detectLanguage(text);
-    const voice = pickBestVoice(lang);
-
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = voice?.lang || lang;
-    if (voice) {
-      utterance.voice = voice;
-    }
-    // Slightly slower for clearer pronunciation in study mode.
-    utterance.rate = 0.9;
-    utterance.pitch = 1;
-    utterance.volume = 1;
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
-    setIsSpeaking(true);
-  };
-
-  const extractLookupWord = (text: string) => {
-    const cleaned = text
-      .trim()
-      .replace(/[?.,!;:()[\]{}"“”]/g, " ")
-      .split(/\s+/)
-      .find((w) => /^[a-zA-Z'-]+$/.test(w));
-
-    return cleaned ? cleaned.toLowerCase() : "";
-  };
-
-  const fetchPhonetic = async (cardId: string, question: string) => {
-    const lang = detectLanguage(question);
-    if (lang !== "en-US") {
-      setPhonetics((prev) => ({
-        ...prev,
-        [cardId]: "IPA chưa hỗ trợ tốt cho ngôn ngữ này",
-      }));
-      return;
-    }
-
-    const lookupWord = extractLookupWord(question);
-    if (!lookupWord) {
-      return;
-    }
-
-    setLoadingPhonetic(true);
+  const handleResetPractice = async () => {
+    if (!window.confirm("Reset toàn bộ tiến độ luyện tập?")) return;
 
     try {
-      const response = await fetch(
-        `https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(lookupWord)}`,
-      );
-
-      if (!response.ok) {
-        throw new Error(`Phonetic API failed (${response.status})`);
-      }
-
-      const data = (await response.json()) as Array<{
-        phonetic?: string;
-        phonetics?: Array<{ text?: string }>;
-      }>;
-
-      const fromMain = data?.[0]?.phonetic;
-      const fromList = data?.[0]?.phonetics?.find((p) => p.text)?.text;
-      const phonetic = fromMain || fromList;
-
-      if (phonetic) {
-        setPhonetics((prev) => ({ ...prev, [cardId]: phonetic }));
-      }
-    } catch (error) {
-      console.error("Failed to fetch phonetic:", error);
-      setPhonetics((prev) => ({
-        ...prev,
-        [cardId]: "Không lấy được phiên âm",
-      }));
-    } finally {
-      setLoadingPhonetic(false);
+      await resetPractice();
+      await loadData();
+    } catch (e) {
+      alert("Reset thất bại!");
     }
   };
-
-  const currentCard = flashcards[0];
 
   return (
     <div className="dashboard">
       <div className="header">
         <h2>Flashcard Pro</h2>
         <div className="user-menu">
-          <div className="avatar" title={user?.name || user?.email || "User"}>
+          <div className="avatar" title={user?.name || user?.email}>
             {user?.picture ? (
-              <img
-                className="avatar-img"
-                src={user.picture}
-                alt="User avatar"
-              />
+              <img src={user.picture} alt="avatar" />
             ) : (
-              <span className="avatar-fallback">
-                {String(user?.name || user?.email || "U")
-                  .charAt(0)
-                  .toUpperCase()}
-              </span>
+              <span>{(user?.name || user?.email || "U").charAt(0)}</span>
             )}
           </div>
-
-          <button
-            className="btn-logout btn-logout-icon"
-            onClick={onLogout}
-            title="Logout"
-          >
-            <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-              <path
-                d="M15 3h-4a2 2 0 0 0-2 2v3h2V5h4v14h-4v-3H9v3a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm-3.6 6.4-1.4 1.4 2.2 2.2H4v2h8.2L10 17.2l1.4 1.4L16 14l-4.6-4.6z"
-                fill="currentColor"
-              />
-            </svg>
+          <button className="btn-logout" onClick={onLogout}>
+            Đăng xuất
           </button>
         </div>
       </div>
@@ -495,19 +117,15 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
       {stats && (
         <div className="stats-strip">
           <div className="stat-pill">
-            <span className="stat-key">Due</span>
-            <span className="stat-value">{stats.dueToday}</span>
+            <span>Cần ôn</span>
+            <span className="stat-value">{stats.toReview}</span>
           </div>
           <div className="stat-pill">
-            <span className="stat-key">Learned</span>
+            <span>Đã thuộc</span>
             <span className="stat-value">{stats.learned}</span>
           </div>
           <div className="stat-pill">
-            <span className="stat-key">To Learn</span>
-            <span className="stat-value">{stats.toLearn}</span>
-          </div>
-          <div className="stat-pill">
-            <span className="stat-key">Total</span>
+            <span>Tổng thẻ</span>
             <span className="stat-value">{stats.total}</span>
           </div>
         </div>
@@ -521,6 +139,12 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
           📖 Review
         </button>
         <button
+          className={`tab ${activeTab === "practice" ? "active" : ""}`}
+          onClick={() => setActiveTab("practice")}
+        >
+          ✍ Practice
+        </button>
+        <button
           className={`tab ${activeTab === "create" ? "active" : ""}`}
           onClick={() => setActiveTab("create")}
         >
@@ -532,156 +156,83 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
         {activeTab === "review" && (
           <div className="review-section">
             {loading ? (
-              <p>Loading cards...</p>
+              <p>Đang tải...</p>
             ) : currentCard ? (
               <div className="study-card-wrap">
                 <div className="study-progress">
-                        <span>
-                          {activeLesson
-                            ? `Lesson ${Math.min(
-                                activeLesson.currentIndex + 1,
-                                activeLesson.totalCards,
-                              )}/${activeLesson.totalCards}`
-                            : `${flashcards.length} card(s) due now`}
-                        </span>
-                  <div className="review-actions">
-                    <button
-                      className="btn btn-refresh"
-                            onClick={() => void loadData("due")}
-                    >
-                      Due
-                    </button>
-                    <button
-                      className="btn btn-refresh"
-                            onClick={() => void loadData("lesson")}
-                    >
-                      Relearn
-                    </button>
-                  </div>
-                </div>
-
-                <div className="study-card">
-                  <div className="study-head">
-                    <div className="study-label">
-                      {showAnswer ? "Answer" : "Question"}
-                    </div>
-                    <button
-                      type="button"
-                      className={`audio-btn ${isSpeaking ? "active" : ""}`}
-                      onClick={handleSpeak}
-                      aria-label={
-                        isSpeaking ? "Stop pronunciation" : "Play pronunciation"
-                      }
-                    >
-                      {isSpeaking ? "Stop" : "🔊"}
-                    </button>
-                    {!showAnswer && (
-                      <button
-                        type="button"
-                        className="phonetic-btn"
-                        onClick={() =>
-                          void fetchPhonetic(currentCard.id, currentCard.front)
-                        }
-                        disabled={loadingPhonetic}
-                        aria-label="Fetch phonetic"
-                      >
-                        {loadingPhonetic ? "..." : "IPA"}
-                      </button>
-                    )}
-                  </div>
-
+                  <span>
+                    {flashcards.length} thẻ cần ôn ({currentCard.gotItCount}/7)
+                  </span>
                   <button
-                    type="button"
-                    className="study-card-button"
-                    onClick={() => setShowAnswer((prev) => !prev)}
+                    className="btn btn-danger"
+                    onClick={handleResetPractice}
                   >
-                    <div className="study-text">
-                      {showAnswer ? currentCard.back : currentCard.front}
-                    </div>
-                    {!showAnswer && phonetics[currentCard.id] && (
-                      <div className="study-phonetic">
-                        {phonetics[currentCard.id]}
-                      </div>
-                    )}
-                    <div className="study-hint">Tap card to flip</div>
+                    Reset
                   </button>
-
-                  <div className="study-divider" />
-                  <div className="card-stats">
-                    <span>Reps: {currentCard.repetitions}</span>
-                    <span>EF: {currentCard.easeFactor.toFixed(2)}</span>
-                  </div>
                 </div>
 
-                {showAnswer && (
-                  <div className="grade-panel">
-                    <p className="grade-title">How well did you remember?</p>
-                    <div className="grade-buttons">
-                      <button
-                        className="btn grade grade-bad"
-                        disabled={submittingReview}
-                        onClick={() => void submitReview(1)}
-                      >
-                        Forgot (1)
-                      </button>
-                      <button
-                        className="btn grade grade-hard"
-                        disabled={submittingReview}
-                        onClick={() => void submitReview(3)}
-                      >
-                        Hard (3)
-                      </button>
-                      <button
-                        className="btn grade grade-good"
-                        disabled={submittingReview}
-                        onClick={() => void submitReview(4)}
-                      >
-                        Good (4)
-                      </button>
-                      <button
-                        className="btn grade grade-easy"
-                        disabled={submittingReview}
-                        onClick={() => void submitReview(5)}
-                      >
-                        Easy (5)
-                      </button>
-                    </div>
+                {/* Thẻ có thể lật */}
+                <button
+                  className="study-card-button"
+                  onClick={() => setShowAnswer(!showAnswer)}
+                >
+                  <div className="study-text">
+                    {showAnswer ? currentCard.back : currentCard.front}
                   </div>
-                )}
+                  <div className="study-hint">
+                    {showAnswer ? "Nhấn để xem câu hỏi" : "Nhấn để xem đáp án"}
+                  </div>
+                </button>
+
+                {/* 2 nút luôn hiển thị, dù chưa lật */}
+                <div className="grade-panel always-visible">
+                  <p className="grade-title">Bạn nhớ thẻ này thế nào?</p>
+                  <div className="grade-buttons">
+                    <button
+                      className="btn grade grade-bad"
+                      disabled={submittingReview}
+                      onClick={() => handleReview(false)}
+                    >
+                      Study Again
+                    </button>
+
+                    <button
+                      className="btn grade grade-good"
+                      disabled={submittingReview}
+                      onClick={() => handleReview(true)}
+                    >
+                      Got It
+                      <br />
+                      <small>({currentCard.gotItCount + 1}/7)</small>
+                    </button>
+                  </div>
+                </div>
 
                 {reviewMessage && (
                   <p className="review-message">{reviewMessage}</p>
                 )}
               </div>
             ) : (
-              <div>
-                <p className="no-cards">No cards due for review! 🎉</p>
-                <div className="review-actions review-actions-center">
-                  <button
-                    className="btn btn-refresh"
-                    onClick={() => void loadData("due")}
-                  >
-                    Check Again
-                  </button>
-                  <button
-                    className="btn btn-refresh"
-                    onClick={() => void loadData("lesson")}
-                  >
-                    Học Lại Tất Cả
-                  </button>
-                </div>
+              <div className="no-cards">
+                <p>🎉 Hiện không có thẻ nào cần ôn!</p>
+                <p>Bạn đã học rất tốt.</p>
+                <button className="btn btn-primary" onClick={loadData}>
+                  Tải lại
+                </button>
               </div>
             )}
           </div>
         )}
 
-        {activeTab === "create" && <CreateCardForm onClose={loadData} />}
+        {activeTab === "practice" && <PracticeScreen />}
+        {activeTab === "create" && <CreateCardForm onSuccess={loadData} />}
       </div>
     </div>
   );
 };
 
-const CreateCardForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
+// Giữ nguyên phần CreateCardForm
+const CreateCardForm: React.FC<{ onSuccess: () => void }> = ({ onSuccess }) => {
   const [front, setFront] = useState("");
   const [back, setBack] = useState("");
   const [loading, setLoading] = useState(false);
@@ -692,8 +243,7 @@ const CreateCardForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 
     try {
       const token = await getAuthToken();
-
-      await fetch("https://flashcard-extension.onrender.com/flashcards", {
+      await fetch(`${API_BASE}/flashcards`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -704,9 +254,9 @@ const CreateCardForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 
       setFront("");
       setBack("");
-      onClose();
+      onSuccess();
     } catch (error) {
-      console.error("Failed to create card:", error);
+      alert("Tạo thẻ thất bại!");
     } finally {
       setLoading(false);
     }
@@ -715,27 +265,25 @@ const CreateCardForm: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   return (
     <form onSubmit={handleSubmit} className="create-form">
       <div className="form-group">
-        <label>Question</label>
+        <label>Câu hỏi / Mặt trước</label>
         <textarea
           value={front}
           onChange={(e) => setFront(e.target.value)}
-          placeholder="Enter the question..."
+          placeholder="Nhập mặt trước..."
           required
         />
       </div>
-
       <div className="form-group">
-        <label>Answer</label>
+        <label>Đáp án / Mặt sau</label>
         <textarea
           value={back}
           onChange={(e) => setBack(e.target.value)}
-          placeholder="Enter the answer..."
+          placeholder="Nhập mặt sau..."
           required
         />
       </div>
-
       <button type="submit" className="btn btn-primary" disabled={loading}>
-        {loading ? "Creating..." : "Create Card"}
+        {loading ? "Đang tạo..." : "Tạo thẻ mới"}
       </button>
     </form>
   );
