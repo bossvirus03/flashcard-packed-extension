@@ -1,8 +1,8 @@
 // Background Service Worker for the extension
 // Handles authentication and message passing
 
-// const API_URL = 'https://flashcard-extension.onrender.com';
-const API_URL = 'http://localhost:3000';
+const API_URL = 'https://flashcard-extension.onrender.com';
+// const API_URL = 'http://localhost:3000';
 
 type AuthTokenResult = string | { token?: string };
 

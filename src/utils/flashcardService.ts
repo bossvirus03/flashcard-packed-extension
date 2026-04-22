@@ -1,8 +1,8 @@
 
 import { getAuthToken } from "./auth";
 
-// export const API_BASE = "https://flashcard-extension.onrender.com";
-export const API_BASE = "http://localhost:3000";
+export const API_BASE = "https://flashcard-extension.onrender.com";
+// export const API_BASE = "http://localhost:3000";
 const PRACTICE_CARDS_URL = `${API_BASE}/flashcards/practice`;
 const REVIEW_CARDS_URL = `${API_BASE}/reviews/cards`;
 const RESET_PRACTICE_URL = `${API_BASE}/reviews/reset`;
